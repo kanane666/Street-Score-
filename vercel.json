@@ -1,0 +1,7 @@
+{
+  "buildCommand": "npm run build:static",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/((?!assets/|icon-|manifest|sw\\.js|workbox-|robots\\.txt|favicon).*)", "destination": "/index.html" }
+  ]
+}
