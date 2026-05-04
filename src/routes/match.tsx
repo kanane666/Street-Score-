@@ -78,21 +78,24 @@ function MatchPage() {
   }, [interPeriod]);
 
   // Detect timer reaching 0 -> buzzer + flash + auto inter-period
+  const remaining = match?.timer.remaining;
+  const isRunning = match?.timer.isRunning;
+  const period = match?.period;
+  const totalPeriods = match?.totalPeriods;
   useEffect(() => {
-    if (!match) return;
     const wasRunning = prevRunningRef.current;
-    if (wasRunning && match.timer.remaining === 0) {
+    if (wasRunning && remaining === 0) {
       playBuzzer(settings.soundEnabled);
       vibrate(settings.vibrationEnabled, [800, 200, 800]);
       setFlash(true);
       window.setTimeout(() => setFlash(false), 900);
-      if (match.period < match.totalPeriods) {
+      if (period !== undefined && totalPeriods !== undefined && period < totalPeriods) {
         setInterSeconds(60);
         setInterPeriod(true);
       }
     }
-    prevRunningRef.current = match.timer.isRunning;
-  }, [match, settings.soundEnabled, settings.vibrationEnabled]);
+    prevRunningRef.current = !!isRunning;
+  }, [remaining, isRunning, period, totalPeriods, settings.soundEnabled, settings.vibrationEnabled]);
 
   // Undo toast
   useEffect(() => {
@@ -137,7 +140,7 @@ function MatchPage() {
       setPulseTeam(team);
       window.setTimeout(() => setPulseTeam(null), 250);
     },
-    [addScore, locked, settings]
+    [addScore, locked, settings.vibrationEnabled, settings.soundEnabled]
   );
 
   const handleEndMatch = () => {

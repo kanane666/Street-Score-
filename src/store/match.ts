@@ -287,6 +287,9 @@ export const useMatch = create<Store>()(
         const s = get().current;
         if (!s || s.finished) return;
         const settings = get().settings;
+        const timerActive = s.timer.isRunning && s.timer.remaining > 0;
+        const scActive = s.shotClock.isRunning && s.shotClock.value > 0;
+        if (!timerActive && !scActive) return;
         let { remaining, isRunning } = s.timer;
         let sc = { ...s.shotClock };
         if (isRunning) {
@@ -409,7 +412,17 @@ export const useMatch = create<Store>()(
         }
         return window.localStorage;
       }),
-      partialize: (s) => ({ current: s.current, history: s.history, settings: s.settings }),
+      partialize: (s) => ({
+        current: s.current
+          ? {
+              ...s.current,
+              timer: { ...s.current.timer, isRunning: false },
+              shotClock: { ...s.current.shotClock, isRunning: false },
+            }
+          : null,
+        history: s.history,
+        settings: s.settings,
+      }),
     }
   )
 );

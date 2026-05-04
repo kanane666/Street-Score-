@@ -1,75 +1,89 @@
 
 
-## Plan : Build statique SPA pour Vercel/Netlify
+## Plan : Corriger les freezes et la surchauffe sur l'écran de match
 
-### Le contexte technique honnête
+### Diagnostic (cause racine)
 
-Ton projet utilise **TanStack Start** (framework SSR) avec un preset Cloudflare Workers — c'est pour ça que `npm run build` produit `dist/client/` + `dist/server/` au lieu d'un simple `dist/index.html`. Pour un déploiement statique pur sur Vercel/Netlify, il faut basculer en mode SPA classique (sans SSR).
+En lisant `src/store/match.ts` et `src/routes/match.tsx`, j'ai trouvé **trois bugs de performance** qui se cumulent et expliquent exactement les symptômes (boutons qui rament, surchauffe, plantage) — sans toucher à la logique :
 
-L'app n'utilise **aucune fonction serveur** — juste des routes client, Zustand + localStorage, et le PWA. Elle est donc 100 % compatible avec un mode SPA. Aucune fonctionnalité ne sera perdue.
+**1. `tick()` écrit dans le store à chaque seconde même quand rien ne tourne (le pire bug)**
+Dans `store/match.ts` ligne 286-304, `tick(1)` est appelé toutes les secondes par `setInterval`. Même quand le chrono ET le shot clock sont à l'arrêt, la fonction crée systématiquement un nouvel objet `current` via `set({ current: {...s, timer: {...}, shotClock: sc} })`. Conséquences :
+- Re-render complet de `MatchPage` chaque seconde même hors match actif
+- Le middleware `persist` de Zustand **sérialise tout le state et écrit dans `localStorage` chaque seconde** (lourd, sync, bloque le main thread → boutons qui ne répondent pas, batterie/CPU)
+- Au fil du temps localStorage devient le goulot, l'app chauffe et finit par lagger jusqu'au crash
 
-### Approche : ajouter un script de build statique parallèle
+**2. Le `useEffect` de buzzer dépend de `match` entier**
+Lignes 81-95 de `match.tsx` : `useEffect(..., [match, ...])`. Comme `match` change de référence à chaque tick (à cause du bug 1), cet effet s'exécute chaque seconde, refait toute la logique de comparaison, déclenche `setFlash` potentiellement, etc. C'est un effet qui devrait tourner uniquement quand `remaining` ou `isRunning` change.
 
-Au lieu de remplacer le build TanStack Start (qui sert encore au preview Lovable), j'ajoute un **second script** `build:static` qui produit le bundle SPA propre. Comme ça tu gardes le preview Lovable intact ET tu as un build déployable.
+**3. Persistance non throttle même légitime**
+Même après le fix 1, écrire dans localStorage à chaque tick actif reste coûteux. On exclut `timer.remaining` et `shotClock.value` du `partialize` — au reload on reprend le match avec le chrono en pause à sa dernière valeur sauvegardée (sauvegarde déclenchée par chaque action utilisateur : score, pause, etc.).
 
 ### Modifications
 
-**1. Nouveau fichier `vite.config.static.ts`** — config Vite minimale en mode SPA
-- Plugins : `@vitejs/plugin-react`, `@tailwindcss/vite`, `vite-tsconfig-paths`, `vite-plugin-pwa` (manifest identique), et le router plugin TanStack en mode `autoCodeSplitting` sans Start
-- `build.outDir: "dist"` (pas `dist/client`)
-- `build.rollupOptions.input: "index.html"` à la racine
-- Pas de `@cloudflare/vite-plugin`, pas de `@tanstack/react-start`
-
-**2. Nouveau `index.html` à la racine** — point d'entrée SPA classique
-- Balises meta de base (title, description, theme-color, manifest, icônes)
-- `<div id="root"></div>` + `<script type="module" src="/src/main.tsx">`
-
-**3. Nouveau `src/main.tsx`** — bootstrap React/Router côté client uniquement
-- Crée le QueryClient (si besoin) et le router via `getRouter()`
-- Monte `<RouterProvider router={router} />` dans `#root`
-- Importe `./styles.css`
-- Importe `virtual:pwa-register` pour activer le SW
-
-**4. Adapter `src/routes/__root.tsx`** — version SPA-safe
-- Le `shellComponent` actuel rend `<html><body>` (SSR). En SPA, le shell HTML vient de `index.html`, donc `__root.tsx` doit juste exposer `component: RootComponent` (avec `<Outlet />`, Toaster, PWARegister).
-- Je garde le `head()` actuel mais via `HeadContent` rendu dans le component, pas dans un shell HTML.
-- **Important** : pour ne pas casser le build TanStack Start existant (utilisé par le preview Lovable), je conditionne : `shellComponent` reste pour Start, et le SPA ignore juste le shell (TanStack Router sans Start n'utilise pas `shellComponent`).
-
-**5. Nouveaux scripts dans `package.json`**
-```json
-"build:static": "vite build --config vite.config.static.ts",
-"preview:static": "vite preview --config vite.config.static.ts"
+**1. `src/store/match.ts` — `tick()` : early-return si rien ne tourne**
+```ts
+tick: (delta) => {
+  const s = get().current;
+  if (!s || s.finished) return;
+  const settings = get().settings;
+  const timerActive = s.timer.isRunning && s.timer.remaining > 0;
+  const scActive = s.shotClock.isRunning && s.shotClock.value > 0;
+  if (!timerActive && !scActive) return; // ← clé : pas de set, pas de re-render, pas de persist
+  // ...reste du calcul existant inchangé
+}
 ```
-Le `npm run build` existant reste inchangé (preview Lovable intact).
+Comportement identique côté UX : si rien ne tourne, rien ne change → on n'a pas besoin de re-render.
 
-**6. Fichiers de routing SPA fallback**
-- `public/_redirects` (Netlify) : `/* /index.html 200`
-- `vercel.json` à la racine : rewrites de `/(.*)` vers `/index.html`
-
-**7. PWA**
-- Le plugin `vite-plugin-pwa` reste configuré dans `vite.config.static.ts` avec le même manifest et workbox que la config actuelle. `manifest.webmanifest`, `sw.js`, et les icônes seront générés dans `dist/`.
-
-### Résultat après `npm run build:static`
-
+**2. `src/store/match.ts` — `partialize` allégé**
+```ts
+partialize: (s) => ({
+  current: s.current
+    ? {
+        ...s.current,
+        timer: { ...s.current.timer, isRunning: false }, // toujours en pause au reload
+        shotClock: { ...s.current.shotClock, isRunning: false },
+      }
+    : null,
+  history: s.history,
+  settings: s.settings,
+}),
 ```
-dist/
-  index.html              ← point d'entrée
-  assets/                 ← JS + CSS bundle
-  icon-192.png
-  icon-512.png
-  manifest.webmanifest
-  sw.js
-  workbox-*.js
-  _redirects              ← Netlify SPA fallback
+Ça garde la persistance complète (score, fautes, time-outs, période, events, valeur exacte du chrono et du shot clock au dernier `set`), mais la sauvegarde n'arrive plus que sur les actions utilisateur, plus à chaque tick. Bonus : reload en pause = comportement plus sûr (l'utilisateur reprend manuellement).
+
+**3. `src/routes/match.tsx` — découpler le useEffect buzzer**
+Sélectionner précisément `remaining` et `isRunning` au lieu de `match` entier dans la dépendance :
+```ts
+const remaining = match?.timer.remaining;
+const isRunning = match?.timer.isRunning;
+useEffect(() => {
+  const wasRunning = prevRunningRef.current;
+  if (wasRunning && remaining === 0) {
+    playBuzzer(settings.soundEnabled);
+    vibrate(settings.vibrationEnabled, [800, 200, 800]);
+    setFlash(true);
+    window.setTimeout(() => setFlash(false), 900);
+    if (match && match.period < match.totalPeriods) {
+      setInterSeconds(60);
+      setInterPeriod(true);
+    }
+  }
+  prevRunningRef.current = !!isRunning;
+}, [remaining, isRunning, settings.soundEnabled, settings.vibrationEnabled, match?.period, match?.totalPeriods]);
 ```
 
-Tu peux déposer ce dossier sur Netlify drop, ou lier le repo à Vercel avec `Build Command: npm run build:static` et `Output Directory: dist`. Le `vercel.json` gère le SPA fallback.
+**4. `src/routes/match.tsx` — `onScore` : enlever `settings` global de la dep**
+Petit gain : remplacer `settings` par `settings.vibrationEnabled, settings.soundEnabled` dans les deps de `useCallback` pour éviter de recréer le handler quand un autre paramètre des settings change.
 
-### Hors scope (intact)
+### Hors scope
+Aucun changement à : règles de score, chrono, shot clock, fautes, time-outs, undo, périodes, historique, design/UI, animations, routes, store API publique. Pas de nouvelle dépendance. Pas de modification de la PWA / service worker (non incriminés ici).
 
-Aucun changement à : score, chrono, shot clock, fautes, time-outs, historique, persistance localStorage, Zustand store, routes, composants UI, styles. Pure config build.
+### Résultat attendu
+- Plus de re-render ni d'écriture localStorage quand le match est en pause → boutons réactifs immédiatement
+- En match actif : 1 re-render/sec (légitime pour le chrono) au lieu de cascades d'effets parasites
+- Plus de surchauffe — la charge CPU passe de ~100% sporadique à quasi nulle hors tick actif
+- Stabilité longue durée
 
 ### Fichiers touchés
-- **Nouveaux** : `index.html` (racine), `src/main.tsx`, `vite.config.static.ts`, `vercel.json`, `public/_redirects`
-- **Modifiés** : `package.json` (ajout 2 scripts), `src/routes/__root.tsx` (rendre `HeadContent` dans le composant pour que ça marche en SPA aussi)
+- `src/store/match.ts` (modif `tick` + `partialize`)
+- `src/routes/match.tsx` (deps des `useEffect` / `useCallback`)
 

@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { Info } from "lucide-react";
 import { useMatch } from "@/store/match";
 import { BasketballIcon } from "@/components/BasketballIcon";
 import { SetupSheet } from "@/components/SetupSheet";
 import { HistoryDetail } from "@/components/HistoryDetail";
 import { InstallBanner } from "@/components/InstallBanner";
+import { AboutDialog } from "@/components/AboutDialog";
 import type { MatchRecord } from "@/store/match";
 import streetscoreLogo from "@/assets/streetscore-logo.png";
 
@@ -24,6 +26,7 @@ function HomePage() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [detail, setDetail] = useState<MatchRecord | null>(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -37,6 +40,13 @@ function HomePage() {
             className="h-9 w-auto object-contain"
           />
           <span className="text-lg font-bold tracking-tight">StreetScore</span>
+          <button
+            onClick={() => setAboutOpen(true)}
+            aria-label="À propos"
+            className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+          >
+            <Info className="h-5 w-5" />
+          </button>
         </header>
 
         {/* CTA */}
@@ -105,6 +115,7 @@ function HomePage() {
 
       <SetupSheet open={setupOpen} onClose={() => setSetupOpen(false)} />
       <HistoryDetail open={!!detail} record={detail} onClose={() => setDetail(null)} />
+      <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
       <InstallBanner />
     </div>
   );
